@@ -1,41 +1,45 @@
 :root {
-  --bg: #f4f5fb;
+  --bg: #f3f6f4;
   --surface: #ffffff;
-  --surface-alt: #fafbff;
-  --border: #e5e7f2;
-  --text: #161a2b;
-  --text-muted: #6b7086;
-  --accent: #4f46e5;
-  --accent-hover: #4338ca;
-  --accent-soft: #eef0fe;
-  --accent-text: #4338ca;
-  --ok-fg: #15803d;
-  --ok-bg: #eafbf1;
-  --warn-fg: #b45309;
-  --warn-bg: #fff8e8;
-  --crit-fg: #b91c1c;
-  --crit-bg: #fef0f0;
-  --shadow-sm: 0 1px 2px rgba(20, 22, 45, 0.04), 0 1px 3px rgba(20, 22, 45, 0.06);
-  --shadow-md: 0 4px 14px rgba(20, 22, 45, 0.08);
-  --radius-lg: 14px;
-  --radius-md: 10px;
-  --radius-sm: 7px;
+  --surface-alt: #f7faf8;
+  --border: #dfe7e2;
+  --text: #16241c;
+  --text-muted: #5b6b62;
+  --accent: #2f8d46;
+  --accent-hover: #257238;
+  --accent-soft: #e8f5ea;
+  --accent-text: #217a37;
+  --navbar: #2f8d46;
+  --navbar-text: #ffffff;
+  --ok-fg: #1f7a3d;
+  --ok-bg: #e9f9ee;
+  --warn-fg: #a15c07;
+  --warn-bg: #fef6e4;
+  --crit-fg: #b3261e;
+  --crit-bg: #fdecec;
+  --shadow-sm: 0 1px 2px rgba(20, 30, 24, 0.05), 0 1px 3px rgba(20, 30, 24, 0.06);
+  --shadow-md: 0 4px 14px rgba(20, 30, 24, 0.09);
+  --radius-lg: 10px;
+  --radius-md: 8px;
+  --radius-sm: 5px;
   --mono: "SFMono-Regular", ui-monospace, Consolas, "Liberation Mono", Menlo, monospace;
-  --sans: -apple-system, BlinkMacSystemFont, "Segoe UI", Inter, Roboto, Helvetica, Arial, sans-serif;
+  --sans: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
 }
 
 @media (prefers-color-scheme: dark) {
   :root {
-    --bg: #0d0f18;
-    --surface: #151826;
-    --surface-alt: #1b1e2e;
-    --border: #2a2e42;
-    --text: #e7e8f3;
-    --text-muted: #9297ad;
-    --accent: #818cf8;
-    --accent-hover: #a5b4fc;
-    --accent-soft: #1f2140;
-    --accent-text: #b4bcfa;
+    --bg: #0e1512;
+    --surface: #151d19;
+    --surface-alt: #1a231e;
+    --border: #2a352e;
+    --text: #e7ede9;
+    --text-muted: #93a49a;
+    --accent: #46c168;
+    --accent-hover: #6bd487;
+    --accent-soft: #16301f;
+    --accent-text: #6bd487;
+    --navbar: #163a22;
+    --navbar-text: #eafbf0;
     --ok-fg: #4ade80;
     --ok-bg: #123322;
     --warn-fg: #fbbf24;
@@ -53,10 +57,8 @@ html { color-scheme: light dark; }
 
 body {
   margin: 0;
-  padding: 32px 20px 72px;
-  background:
-    radial-gradient(1200px 500px at 15% -10%, var(--accent-soft), transparent 60%),
-    var(--bg);
+  padding: 0 0 72px;
+  background: var(--bg);
   color: var(--text);
   font-family: var(--sans);
   font-size: 14px;
@@ -64,34 +66,63 @@ body {
   -webkit-font-smoothing: antialiased;
 }
 
+.navbar {
+  background: var(--navbar);
+  color: var(--navbar-text);
+  padding: 14px 20px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.12);
+}
+
+.navbar-inner {
+  max-width: 1120px;
+  margin: 0 auto;
+  width: 100%;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+
+.navbar .brand {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  font-size: 18px;
+  font-weight: 700;
+  letter-spacing: -0.01em;
+}
+
+.navbar .brand::before {
+  content: "";
+  display: inline-block;
+  width: 11px;
+  height: 11px;
+  border-radius: 3px;
+  background: #fff;
+  opacity: 0.92;
+}
+
+.navbar .tag {
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  background: rgba(255, 255, 255, 0.16);
+  padding: 4px 10px;
+  border-radius: 99px;
+}
+
 .wrap {
   max-width: 1120px;
   margin: 0 auto;
-}
-
-h1 {
-  font-size: 26px;
-  font-weight: 700;
-  letter-spacing: -0.02em;
-  margin: 0 0 6px;
-  display: flex;
-  align-items: center;
-  gap: 10px;
-}
-
-h1::before {
-  content: "";
-  display: inline-block;
-  width: 10px;
-  height: 10px;
-  border-radius: 3px;
-  background: linear-gradient(135deg, var(--accent), #a78bfa);
-  box-shadow: 0 0 0 4px var(--accent-soft);
+  padding: 26px 20px 0;
 }
 
 .subtitle {
   color: var(--text-muted);
-  margin: 0 0 26px;
+  margin: 0 0 22px;
   font-size: 14.5px;
 }
 
@@ -105,15 +136,24 @@ h1::before {
 }
 
 .card h2 {
-  font-size: 14px;
+  font-size: 17px;
   font-weight: 700;
-  text-transform: uppercase;
-  letter-spacing: 0.04em;
   color: var(--text);
   margin: 0 0 16px;
+  padding-bottom: 10px;
+  border-bottom: 2px solid var(--accent-soft);
   display: flex;
   align-items: center;
-  gap: 8px;
+  gap: 9px;
+}
+
+.card h2::before {
+  content: "";
+  display: inline-block;
+  width: 4px;
+  height: 16px;
+  border-radius: 2px;
+  background: var(--accent);
 }
 
 .form-grid {
@@ -162,12 +202,12 @@ button.primary {
   font-size: 14px;
   font-weight: 600;
   cursor: pointer;
-  box-shadow: 0 2px 8px rgba(79, 70, 229, 0.35);
+  box-shadow: 0 2px 8px rgba(47, 141, 70, 0.35);
   transition: transform 0.1s ease, box-shadow 0.15s ease, opacity 0.15s ease;
 }
 
 button.primary:hover:not(:disabled) {
-  box-shadow: 0 4px 14px rgba(79, 70, 229, 0.45);
+  box-shadow: 0 4px 14px rgba(47, 141, 70, 0.45);
   transform: translateY(-1px);
 }
 

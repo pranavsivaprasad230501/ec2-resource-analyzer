@@ -162,16 +162,22 @@ SYSTEMD_PIDS=""
 if command -v systemctl >/dev/null 2>&1 && systemctl list-units >/dev/null 2>&1; then
   echo "@@AVAILABLE@@"
   UNITS=$(systemctl list-units --type=service --state=running --no-legend --no-pager 2>/dev/null | awk '{print $1}')
-  if [ -n "$UNITS" ]; then
-    # A single batched `systemctl show` for every unit at once, instead of
-    # one (or three) systemctl invocations per unit - each systemctl call is
-    # a real process spawn plus a D-Bus round trip, so with dozens of
-    # running services that adds up fast. `Id` is requested first purely as
-    # a reliable per-unit delimiter in the flat output stream.
-    SHOW_OUT=$(systemctl show $UNITS -p Id,MainPID,WorkingDirectory,User,ActiveState,SubState --no-pager 2>/dev/null)
-    echo "$SHOW_OUT"
-    SYSTEMD_PIDS=$(echo "$SHOW_OUT" | grep '^MainPID=' | cut -d= -f2 | grep -v '^0$')
-  fi
+  # One `systemctl show` per unit (not batched across units in a single
+  # call): different systemd/D-Bus versions are not consistently documented
+  # on how multi-unit `-p`-filtered output is delimited, and getting that
+  # wrong would silently corrupt or drop application data - which matters
+  # far more here than shaving a few hundred ms off this section. This is
+  # still down from 3 systemctl invocations per unit to 1 (no more separate
+  # `systemctl cat` for ExecStart, and MainPID is read from this same call).
+  for u in $UNITS; do
+    echo "@@UNIT:$u@@"
+    UNIT_SHOW=$(systemctl show "$u" -p MainPID,WorkingDirectory,User,ActiveState,SubState --no-pager 2>/dev/null)
+    echo "$UNIT_SHOW"
+    MP=$(echo "$UNIT_SHOW" | grep '^MainPID=' | cut -d= -f2)
+    if [ -n "$MP" ] && [ "$MP" != "0" ]; then
+      SYSTEMD_PIDS="$SYSTEMD_PIDS $MP"
+    fi
+  done
 else
   echo "@@UNAVAILABLE@@"
 fi
@@ -829,30 +835,23 @@ def parse_docker_ports(raw: str) -> List[Dict[str, Any]]:
 
 
 def parse_systemd(text: str) -> Dict[str, Any]:
-    """Parse a single batched `systemctl show <units...> -p Id,MainPID,...`
-    call for every running unit at once. There is no reliable blank-line
-    separator between units in this filtered-property form, so `Id=<unit>`
-    (requested first) is used as the per-unit delimiter instead - it's the
-    one property guaranteed to be unique and present for every unit."""
+    """Parse one `systemctl show <unit> -p MainPID,...` call per running
+    unit, each preceded by an `@@UNIT:<name>@@` marker we control (unlike
+    systemd's own output format, which is not consistently documented across
+    versions for how multiple filtered-property blocks are delimited)."""
     text = text.strip()
     if not text or text.startswith("@@UNAVAILABLE@@"):
         return {"available": False, "services": []}
     body = text[len("@@AVAILABLE@@"):] if text.startswith("@@AVAILABLE@@") else text
-    body = body.strip()
-    if not body:
-        return {"available": True, "services": []}
-    blocks = re.split(r"(?m)^Id=", body)
+    blocks = re.split(r"@@UNIT:(.*?)@@", body)
     services = []
-    for block in blocks:
-        block = block.strip()
-        if not block:
-            continue
-        lines = block.splitlines()
-        unit_name = lines[0].strip()
+    it = iter(blocks[1:])
+    for unit, content in zip(it, it):
+        unit_name = unit.strip()
         if not unit_name:
             continue
         props: Dict[str, str] = {}
-        for line in lines[1:]:
+        for line in content.strip().splitlines():
             line = line.strip()
             if "=" in line:
                 k, _, v = line.partition("=")

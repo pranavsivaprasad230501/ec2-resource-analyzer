@@ -142,12 +142,16 @@ sequentially:
   difference between what used to be dozens of sequential, individually
   slow `du`/`find` calls (potentially minutes on a server with many
   applications) and one bounded wait.
-- `systemctl show` is called **once** for every running service combined,
-  not once (or three times) per service — each `systemctl` call is a real
-  process spawn plus a D-Bus round trip, so this matters a lot with dozens
-  of services.
-- `docker inspect` is likewise batched into one call for every container
-  instead of two calls per container.
+- `systemctl show` per service is down to **one** call instead of three (the
+  separate `systemctl cat` for `ExecStart` and the extra MainPID-only call
+  were dropped). It's deliberately **not** batched into a single call across
+  *all* services in one invocation — different systemd/D-Bus versions don't
+  consistently document how multi-unit filtered-property output is
+  delimited, and silently getting that wrong would mean losing application
+  data, which matters far more than the extra process spawns saved.
+- `docker inspect` is batched into one call for every container instead of
+  two calls per container (this one has an unambiguous, well-documented
+  multi-argument format, unlike `systemctl show`).
 
 ## Precise application identification
 
