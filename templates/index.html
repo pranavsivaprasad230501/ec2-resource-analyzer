@@ -1,0 +1,482 @@
+<title>EC2 Resource Analyzer</title>
+<link rel="stylesheet" href="/static/style.css">
+
+<div class="wrap">
+  <h1>EC2 Resource Analyzer</h1>
+  <p class="subtitle">Connect over SSH, analyze CPU/memory/disk/log usage, and see which application is responsible.</p>
+
+  <div class="card">
+    <h2>Connect to server</h2>
+    <form id="analyze-form">
+      <div class="form-grid">
+        <div class="field">
+          <label for="host">Host / IP</label>
+          <input id="host" name="host" placeholder="10.0.3.64" required>
+        </div>
+        <div class="field">
+          <label for="username">Username</label>
+          <input id="username" name="username" placeholder="ubuntu" required>
+        </div>
+        <div class="field">
+          <label for="port">Port</label>
+          <input id="port" name="port" type="number" value="22" min="1" max="65535">
+        </div>
+        <div class="field">
+          <button type="submit" class="primary" id="analyze-btn">Analyze Server</button>
+        </div>
+      </div>
+      <label style="display:flex; align-items:center; gap:8px; margin-top:14px; font-size:13px; font-weight:normal;">
+        <input type="checkbox" id="use_sudo" style="width:auto;">
+        Attempt passwordless sudo for full port-ownership visibility (optional, off by default)
+      </label>
+    </form>
+    <p class="section-note" style="margin-top:12px;">
+      Authenticates the same way a plain <code>ssh username@host</code> would - via your
+      running ssh-agent and/or default keys in <code>~/.ssh/</code>. The server's public key
+      must already be in that user's <code>~/.ssh/authorized_keys</code>. This app never
+      writes, deletes, or modifies anything on the server - every remote command is
+      read-only, and unknown SSH host keys are rejected rather than auto-trusted.
+    </p>
+    <div id="progress" style="margin-top:14px;">
+      <div class="spinner"></div>
+      <span id="progress-text">Connecting to server...</span>
+    </div>
+  </div>
+
+  <div class="card" id="error-box">
+    <h2 id="error-title">SSH Connection Failed</h2>
+    <p id="error-reason"></p>
+    <ul class="hints" id="error-hints"></ul>
+  </div>
+
+  <div id="results"></div>
+</div>
+
+<script>
+const PROGRESS_STEPS = [
+  "Connecting to server...",
+  "Collecting system information...",
+  "Analyzing processes...",
+  "Discovering applications...",
+  "Analyzing disk...",
+  "Analyzing logs...",
+];
+
+function fmtBytes(bytes) {
+  if (bytes === null || bytes === undefined) return "-";
+  const gb = bytes / (1024 ** 3);
+  if (gb >= 1) return gb.toFixed(gb >= 10 ? 0 : 1) + " GB";
+  const mb = bytes / (1024 ** 2);
+  if (mb >= 1) return mb.toFixed(mb >= 10 ? 0 : 1) + " MB";
+  const kb = bytes / 1024;
+  return kb.toFixed(0) + " KB";
+}
+function fmtKb(kb) { return kb === null || kb === undefined ? "-" : fmtBytes(kb * 1024); }
+function fmtPct(p) { return p === null || p === undefined ? "-" : p.toFixed(1) + "%"; }
+function esc(s) {
+  return (s === null || s === undefined ? "" : String(s))
+    .replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+}
+function pill(status) {
+  if (!status) status = "UNKNOWN";
+  return `<span class="pill ${status}">${status}</span>`;
+}
+
+let progressTimer = null;
+function startProgress() {
+  const box = document.getElementById("progress");
+  const text = document.getElementById("progress-text");
+  box.style.display = "flex";
+  let i = 0;
+  text.textContent = PROGRESS_STEPS[0];
+  progressTimer = setInterval(() => {
+    i = Math.min(i + 1, PROGRESS_STEPS.length - 1);
+    text.textContent = PROGRESS_STEPS[i];
+  }, 2500);
+}
+function stopProgress() {
+  clearInterval(progressTimer);
+  document.getElementById("progress").style.display = "none";
+}
+
+document.getElementById("analyze-form").addEventListener("submit", async (e) => {
+  e.preventDefault();
+  const btn = document.getElementById("analyze-btn");
+  document.getElementById("error-box").style.display = "none";
+  document.getElementById("results").style.display = "none";
+  btn.disabled = true;
+  startProgress();
+
+  const payload = {
+    host: document.getElementById("host").value.trim(),
+    username: document.getElementById("username").value.trim(),
+    port: parseInt(document.getElementById("port").value || "22", 10),
+    use_sudo: document.getElementById("use_sudo").checked,
+  };
+
+  try {
+    const resp = await fetch("/api/analyze", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload),
+    });
+    const data = await resp.json();
+    stopProgress();
+    btn.disabled = false;
+    if (!resp.ok || data.error) {
+      showError(data);
+    } else {
+      renderResults(data);
+    }
+  } catch (err) {
+    stopProgress();
+    btn.disabled = false;
+    showError({ title: "Request Failed", reason: String(err), hints: ["Check that the local server is running"] });
+  }
+});
+
+function showError(data) {
+  document.getElementById("error-title").textContent = data.title || "Error";
+  document.getElementById("error-reason").textContent = data.reason || "";
+  const hintsEl = document.getElementById("error-hints");
+  hintsEl.innerHTML = "";
+  (data.hints || []).filter(Boolean).forEach((h) => {
+    const li = document.createElement("li");
+    li.textContent = h;
+    hintsEl.appendChild(li);
+  });
+  document.getElementById("error-box").style.display = "block";
+}
+
+function renderResults(data) {
+  const el = document.getElementById("results");
+  el.innerHTML =
+    renderServerOverview(data) +
+    renderHealthRow(data) +
+    renderCpuMemory(data) +
+    renderDisk(data) +
+    renderApplications(data) +
+    renderNetworkPorts(data) +
+    renderDocker(data) +
+    renderSystemd(data) +
+    renderFindings(data);
+  el.style.display = "block";
+  attachAppRowHandlers(data);
+}
+
+function renderServerOverview(data) {
+  const s = data.server;
+  return `<div class="card">
+    <h2>Server</h2>
+    <p class="mono">${esc(s.hostname)} (${esc(s.host)}) &middot; ${esc(s.kernel)}</p>
+  </div>`;
+}
+
+function renderHealthRow(data) {
+  const h = data.health;
+  return `<div class="card">
+    <h2>Health Overview</h2>
+    <div class="health-row">
+      <div class="health-tile">
+        <div class="label">CPU</div>
+        <div class="value">${data.cpu.usage_percent !== null ? data.cpu.usage_percent.toFixed(0) + "%" : "-"}</div>
+        ${pill(h.cpu.status)}
+      </div>
+      <div class="health-tile">
+        <div class="label">Memory</div>
+        <div class="value">${fmtPct(data.memory.usage_percent)}</div>
+        ${pill(h.memory.status)}
+      </div>
+      <div class="health-tile">
+        <div class="label">Disk (worst filesystem)</div>
+        <div class="value">${h.disk.value !== null ? h.disk.value.toFixed(0) + "%" : "-"}</div>
+        ${pill(h.disk.status)}
+      </div>
+    </div>
+  </div>`;
+}
+
+function procRows(procs) {
+  return procs.map(p => `<tr>
+    <td>${p.pid}</td>
+    <td>${p.cpu_percent.toFixed(1)}%</td>
+    <td>${fmtKb(p.rss_kb)}</td>
+    <td class="mono wrap-cell">${esc(p.comm)}</td>
+  </tr>`).join("");
+}
+
+function renderCpuMemory(data) {
+  const cpu = data.cpu, mem = data.memory;
+  return `<div class="card">
+    <div class="two-col">
+      <div>
+        <h2>CPU</h2>
+        <p class="section-note">Cores: ${cpu.cores} &middot; Load average: ${cpu.load_average.load1} / ${cpu.load_average.load5} / ${cpu.load_average.load15}
+        &middot; Note: usage can exceed 100% on multi-core systems.</p>
+        <table>
+          <thead><tr><th>PID</th><th>CPU</th><th>Memory</th><th>Command</th></tr></thead>
+          <tbody>${procRows(cpu.top_processes)}</tbody>
+        </table>
+      </div>
+      <div>
+        <h2>Memory</h2>
+        <table>
+          <tbody>
+            <tr><td>Total</td><td>${fmtKb(mem.total_kb)}</td></tr>
+            <tr><td>Used</td><td>${fmtKb(mem.used_kb)}</td></tr>
+            <tr><td>Available</td><td>${fmtKb(mem.available_kb)}</td></tr>
+            <tr><td>Free</td><td>${fmtKb(mem.free_kb)}</td></tr>
+            <tr><td>Swap Total</td><td>${fmtKb(mem.swap_total_kb)}</td></tr>
+            <tr><td>Swap Used</td><td>${fmtKb(mem.swap_used_kb)}</td></tr>
+          </tbody>
+        </table>
+        <h2 style="margin-top:16px;">Top Memory Processes</h2>
+        <table>
+          <thead><tr><th>PID</th><th>CPU</th><th>Memory</th><th>Command</th></tr></thead>
+          <tbody>${procRows(data.top_memory_processes)}</tbody>
+        </table>
+      </div>
+    </div>
+  </div>`;
+}
+
+function renderDisk(data) {
+  const fsRows = data.disk.filesystems.map(f => `<tr>
+    <td class="mono">${esc(f.filesystem)}</td>
+    <td>${esc(f.mount)}</td>
+    <td>${fmtBytes(f.size_bytes)}</td>
+    <td>${fmtBytes(f.used_bytes)}</td>
+    <td>${fmtBytes(f.available_bytes)}</td>
+    <td>${f.usage_percent !== null ? f.usage_percent.toFixed(0) + "%" : "-"}</td>
+  </tr>`).join("");
+
+  const dirBlocks = Object.entries(data.disk.directories).map(([dir, info]) => {
+    const children = (info.children || []).slice(0, 8);
+    const items = children.map(e => `<li><span class="path">${esc(e.path)}</span><span>${fmtBytes(e.size_bytes)}</span></li>`).join("");
+    return `<div style="margin-bottom:10px;">
+      <strong class="mono">${esc(dir)}</strong> <span class="muted">${fmtBytes(info.total_bytes)}</span>
+      <ul class="dirtree">${items || "<li><span class='path'>(no subdirectory data / permission denied)</span></li>"}</ul>
+    </div>`;
+  }).join("");
+
+  return `<div class="card">
+    <h2>Disk</h2>
+    <table>
+      <thead><tr><th>Filesystem</th><th>Mount</th><th>Size</th><th>Used</th><th>Available</th><th>Usage</th></tr></thead>
+      <tbody>${fsRows}</tbody>
+    </table>
+    <h2 style="margin-top:18px;">Directory Usage</h2>
+    <p class="section-note">Immediate subdirectories of key locations, sized with a bounded scan.</p>
+    ${dirBlocks}
+  </div>`;
+}
+
+function techBadge(t) { return `<span class="badge-tech">${esc(t)}</span>`; }
+
+function formatPortsForApp(a) {
+  const ports = a.ports || [];
+  if (!ports.length) return "-";
+  const seen = new Set();
+  const labels = [];
+  for (const p of ports) {
+    let key, label;
+    if (p.host_port !== undefined) {
+      key = `${p.protocol}:${p.host_port ?? p.container_port}`;
+      label = p.host_port ? `${p.host_port}/${p.protocol}` : `${p.container_port}/${p.protocol} (internal)`;
+    } else {
+      key = `${p.protocol}:${p.port}`;
+      label = `${p.port}/${p.protocol}`;
+    }
+    if (!seen.has(key)) { seen.add(key); labels.push(label); }
+  }
+  return esc(labels.join(", "));
+}
+
+function renderApplications(data) {
+  const rows = data.applications.map((a, i) => `<tr class="app-row" data-idx="${i}">
+    <td>${esc(a.name)}</td>
+    <td>${techBadge(a.technology)}</td>
+    <td>${a.cpu_percent !== null && a.cpu_percent !== undefined ? a.cpu_percent.toFixed(0) + "%" : "-"}</td>
+    <td>${fmtKb(a.rss_kb) !== "-" ? fmtKb(a.rss_kb) : (a.memory_usage_display || "-")}</td>
+    <td>${fmtBytes(a.disk.app_files_bytes)}</td>
+    <td>${fmtBytes(a.disk.logs_bytes)}</td>
+    <td class="mono">${formatPortsForApp(a)}</td>
+  </tr>
+  <tr class="detail-row" id="detail-${i}"><td colspan="7"></td></tr>`).join("");
+
+  return `<div class="card">
+    <h2>Applications</h2>
+    <p class="section-note">Click a row for details, command line, ports, and log files. Worker/child processes spawned
+    by an application (e.g. PM2/Next.js render workers) are rolled into that application's totals rather than
+    listed separately. Pure OS/platform infrastructure services (cron, dbus, systemd-*, etc.) are omitted here -
+    see the full raw list in Systemd Services below.</p>
+    <table>
+      <thead><tr><th>Application</th><th>Type</th><th>CPU</th><th>Memory</th><th>App Disk</th><th>Logs</th><th>Ports</th></tr></thead>
+      <tbody>${rows}</tbody>
+    </table>
+  </div>`;
+}
+
+function renderNetworkPorts(data) {
+  const rows = (data.network.port_map || []).map(p => `<tr>
+    <td>${p.port}</td>
+    <td>${esc(p.protocol.toUpperCase())}</td>
+    <td class="mono">${esc(p.address)}</td>
+    <td>${p.application ? esc(p.application) : '<span class="muted">unknown</span>'}</td>
+    <td>${p.technology ? techBadge(p.technology) : "-"}</td>
+    <td>${p.pid ?? "-"}</td>
+    <td class="mono">${esc(p.process || "-")}</td>
+  </tr>`).join("");
+
+  return `<div class="card">
+    <h2>Network Ports</h2>
+    <p class="section-note">Every listening TCP/UDP port found, resolved to an application where possible.
+    Resolving the owner of a port for a process running as a different user can require root - some rows may
+    show the raw process name only, or remain unknown, without it.</p>
+    <table>
+      <thead><tr><th>Port</th><th>Proto</th><th>Address</th><th>Application</th><th>Type</th><th>PID</th><th>Process</th></tr></thead>
+      <tbody>${rows || "<tr><td colspan=7 class='muted'>No listening ports were found (or ss/netstat is unavailable).</td></tr>"}</tbody>
+    </table>
+  </div>`;
+}
+
+function appPortsHtml(a) {
+  const ports = a.ports || [];
+  if (!ports.length) return `<p class="muted">No listening ports detected for this application.</p>`;
+  const rows = ports.map(p => {
+    if (p.host_port !== undefined) {
+      return `<tr>
+        <td>${p.host_port ?? "-"}</td>
+        <td>${esc((p.protocol || "").toUpperCase())}</td>
+        <td class="mono">${esc(p.host_ip || "-")}</td>
+        <td class="mono">container:${p.container_port}</td>
+      </tr>`;
+    }
+    return `<tr>
+      <td>${p.port}</td>
+      <td>${esc((p.protocol || "").toUpperCase())}</td>
+      <td class="mono">${esc(p.address || "-")}</td>
+      <td class="mono">-</td>
+    </tr>`;
+  }).join("");
+  return `<table><thead><tr><th>Port</th><th>Proto</th><th>Address</th><th>Maps to</th></tr></thead><tbody>${rows}</tbody></table>`;
+}
+
+function appDetailHtml(a) {
+  const logFiles = (a.logs.files || []).slice(0, 10).map(f =>
+    `<tr><td class="mono wrap-cell">${esc(f.path)}</td><td>${fmtBytes(f.size_bytes)}</td><td>${esc(new Date(f.modified).toLocaleString())}</td></tr>`
+  ).join("");
+
+  return `<div class="detail-grid">
+    <div class="detail-block">
+      <h4>Overview</h4>
+      <table>
+        <tbody>
+          <tr><td>Technology</td><td>${techBadge(a.technology)}</td></tr>
+          <tr><td>Source</td><td>${esc(a.source)}</td></tr>
+          ${a.service_name ? `<tr><td>Service</td><td class="mono">${esc(a.service_name)} (${esc(a.service_status || "")})</td></tr>` : ""}
+          ${a.pm2_status ? `<tr><td>PM2 Status</td><td class="mono">${esc(a.pm2_status)}</td></tr>` : ""}
+          ${a.container_id ? `<tr><td>Container</td><td class="mono">${esc(a.container_id)} (${esc(a.container_status || "")})</td></tr>` : ""}
+          <tr><td>PID</td><td>${a.pid ?? "-"}</td></tr>
+          <tr><td>User</td><td>${esc(a.user || "-")}</td></tr>
+          <tr><td>Directory</td><td class="mono">${esc(a.directory || "-")}</td></tr>
+        </tbody>
+      </table>
+      ${(a.absorbed_pids && a.absorbed_pids.length) ? `<p class="section-note">CPU/memory totals include ${a.absorbed_pids.length} worker/child process(es) (PID${a.absorbed_pids.length > 1 ? "s" : ""} ${esc(a.absorbed_pids.join(", "))}) spawned by this application.</p>` : ""}
+    </div>
+    <div class="detail-block">
+      <h4>Resource usage</h4>
+      <table>
+        <tbody>
+          <tr><td>CPU</td><td>${a.cpu_percent !== null && a.cpu_percent !== undefined ? a.cpu_percent.toFixed(1) + "%" : "-"}</td></tr>
+          <tr><td>Memory</td><td>${fmtKb(a.rss_kb) !== "-" ? fmtKb(a.rss_kb) : (a.memory_usage_display || "-")}</td></tr>
+          <tr><td>Elapsed</td><td>${esc(a.elapsed || "-")}</td></tr>
+        </tbody>
+      </table>
+      <h4 style="margin-top:12px;">Disk footprint</h4>
+      <div class="disk-stack">
+        <div><span class="muted">App files</span><strong>${fmtBytes(a.disk.app_files_bytes)}</strong></div>
+        <div><span class="muted">Logs</span><strong>${fmtBytes(a.disk.logs_bytes)}</strong></div>
+        <div><span class="muted">Total</span><strong>${fmtBytes(a.disk.total_bytes)}</strong></div>
+      </div>
+    </div>
+    <div class="detail-block" style="grid-column: 1 / -1;">
+      <h4>Command</h4>
+      <div class="cmd">${esc(a.command || "-")}</div>
+    </div>
+    <div class="detail-block" style="grid-column: 1 / -1;">
+      <h4>Ports</h4>
+      ${appPortsHtml(a)}
+    </div>
+    <div class="detail-block" style="grid-column: 1 / -1;">
+      <h4>Largest log files</h4>
+      ${logFiles ? `<table><thead><tr><th>Path</th><th>Size</th><th>Modified</th></tr></thead><tbody>${logFiles}</tbody></table>` : `<p class="muted">No log files found in checked locations: ${esc((a.logs.directories_checked || []).join(", "))}</p>`}
+    </div>
+  </div>`;
+}
+
+function attachAppRowHandlers(data) {
+  document.querySelectorAll("tr.app-row").forEach(row => {
+    row.addEventListener("click", () => {
+      const idx = row.getAttribute("data-idx");
+      const detailRow = document.getElementById("detail-" + idx);
+      const isOpen = detailRow.classList.contains("open");
+      document.querySelectorAll("tr.detail-row.open").forEach(r => r.classList.remove("open"));
+      if (!isOpen) {
+        detailRow.querySelector("td").innerHTML = appDetailHtml(data.applications[idx]);
+        detailRow.classList.add("open");
+      }
+    });
+  });
+}
+
+function renderDocker(data) {
+  const d = data.docker;
+  if (!d.available) {
+    return `<div class="card"><h2>Docker</h2><p class="muted">Docker is not installed or not accessible on this server.</p></div>`;
+  }
+  const rows = d.containers.map(c => `<tr>
+    <td>${esc(c.name)}</td>
+    <td class="mono wrap-cell">${esc(c.image)}</td>
+    <td>${esc(c.status)}</td>
+    <td>${c.cpu_percent !== null ? c.cpu_percent.toFixed(0) + "%" : "-"}</td>
+    <td>${esc(c.memory_usage) || "-"}</td>
+  </tr>`).join("");
+  return `<div class="card">
+    <h2>Docker Applications</h2>
+    <table>
+      <thead><tr><th>Container</th><th>Image</th><th>Status</th><th>CPU</th><th>Memory</th></tr></thead>
+      <tbody>${rows || "<tr><td colspan=5 class='muted'>No running containers.</td></tr>"}</tbody>
+    </table>
+  </div>`;
+}
+
+function renderSystemd(data) {
+  const s = data.systemd;
+  if (!s.available) {
+    return `<div class="card"><h2>Systemd Services</h2><p class="muted">systemd is not available on this server.</p></div>`;
+  }
+  const rows = s.services.map(u => `<tr>
+    <td class="mono">${esc(u.name)}</td>
+    <td>${u.main_pid || "-"}</td>
+    <td>${esc(u.active_state)}/${esc(u.sub_state)}</td>
+    <td class="mono">${esc(u.user)}</td>
+    <td class="mono wrap-cell">${esc(u.working_directory)}</td>
+  </tr>`).join("");
+  return `<div class="card">
+    <h2>Systemd Services (running)</h2>
+    <table>
+      <thead><tr><th>Service</th><th>PID</th><th>Status</th><th>User</th><th>Working Dir</th></tr></thead>
+      <tbody>${rows}</tbody>
+    </table>
+  </div>`;
+}
+
+function renderFindings(data) {
+  const items = data.findings.map(f => `<li class="${f.level}">${f.level === "ok" ? "&check;" : "&#9888;"} ${esc(f.message)}</li>`).join("");
+  return `<div class="card">
+    <h2>Findings</h2>
+    <ul class="findings-list">${items || "<li>No notable findings.</li>"}</ul>
+  </div>`;
+}
+</script>
