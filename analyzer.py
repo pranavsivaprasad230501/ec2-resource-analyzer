@@ -87,7 +87,7 @@ nproc 2>/dev/null
 
 section CPUSAMPLE
 grep '^cpu ' /proc/stat 2>/dev/null
-sleep 1
+sleep 0.4
 grep '^cpu ' /proc/stat 2>/dev/null
 
 section MEMINFO
@@ -97,12 +97,25 @@ section DISKFS
 df -kPT 2>/dev/null || df -kP 2>/dev/null
 
 section DIRSIZES
-for d in / /var /var/log /var/lib/docker /home /opt /tmp; do
-  if [ -d "$d" ]; then
-    echo "@@DIR:$d@@"
-    timeout __DIRSIZE_TIMEOUT__ du -xk --max-depth=1 "$d" 2>/dev/null
-  fi
-done
+# Kick off all 7 scans concurrently (process substitution starts each `du`
+# immediately, buffered through an in-kernel pipe on a fixed fd - no temp
+# files ever touch disk), then read results back below in a fixed order.
+# Total wait is bounded by the single slowest scan, not their sum, which
+# matters a lot here since each of these can independently take seconds.
+if [ -d / ]; then exec 10< <(timeout __DIRSIZE_TIMEOUT__ du -xk --max-depth=1 / 2>/dev/null); fi
+if [ -d /var ]; then exec 11< <(timeout __DIRSIZE_TIMEOUT__ du -xk --max-depth=1 /var 2>/dev/null); fi
+if [ -d /var/log ]; then exec 12< <(timeout __DIRSIZE_TIMEOUT__ du -xk --max-depth=1 /var/log 2>/dev/null); fi
+if [ -d /var/lib/docker ]; then exec 13< <(timeout __DIRSIZE_TIMEOUT__ du -xk --max-depth=1 /var/lib/docker 2>/dev/null); fi
+if [ -d /home ]; then exec 14< <(timeout __DIRSIZE_TIMEOUT__ du -xk --max-depth=1 /home 2>/dev/null); fi
+if [ -d /opt ]; then exec 15< <(timeout __DIRSIZE_TIMEOUT__ du -xk --max-depth=1 /opt 2>/dev/null); fi
+if [ -d /tmp ]; then exec 16< <(timeout __DIRSIZE_TIMEOUT__ du -xk --max-depth=1 /tmp 2>/dev/null); fi
+if [ -d / ]; then echo "@@DIR:/@@"; cat <&10; fi
+if [ -d /var ]; then echo "@@DIR:/var@@"; cat <&11; fi
+if [ -d /var/log ]; then echo "@@DIR:/var/log@@"; cat <&12; fi
+if [ -d /var/lib/docker ]; then echo "@@DIR:/var/lib/docker@@"; cat <&13; fi
+if [ -d /home ]; then echo "@@DIR:/home@@"; cat <&14; fi
+if [ -d /opt ]; then echo "@@DIR:/opt@@"; cat <&15; fi
+if [ -d /tmp ]; then echo "@@DIR:/tmp@@"; cat <&16; fi
 
 section PROCESSES
 PS_OUT=$(ps -eo pid=,ppid=,user=,pcpu=,pmem=,rss=,etime=,comm= 2>/dev/null | awk '{$1=$1;print}')
@@ -149,16 +162,16 @@ SYSTEMD_PIDS=""
 if command -v systemctl >/dev/null 2>&1 && systemctl list-units >/dev/null 2>&1; then
   echo "@@AVAILABLE@@"
   UNITS=$(systemctl list-units --type=service --state=running --no-legend --no-pager 2>/dev/null | awk '{print $1}')
-  for u in $UNITS; do
-    echo "@@UNIT:$u@@"
-    systemctl show "$u" -p MainPID,WorkingDirectory,User,ActiveState,SubState,FragmentPath --no-pager 2>/dev/null
-    EXECSTART=$(systemctl cat "$u" 2>/dev/null | grep -m1 '^ExecStart=')
-    echo "$EXECSTART"
-    MP=$(systemctl show "$u" -p MainPID --value 2>/dev/null)
-    if [ -n "$MP" ] && [ "$MP" != "0" ]; then
-      SYSTEMD_PIDS="$SYSTEMD_PIDS $MP"
-    fi
-  done
+  if [ -n "$UNITS" ]; then
+    # A single batched `systemctl show` for every unit at once, instead of
+    # one (or three) systemctl invocations per unit - each systemctl call is
+    # a real process spawn plus a D-Bus round trip, so with dozens of
+    # running services that adds up fast. `Id` is requested first purely as
+    # a reliable per-unit delimiter in the flat output stream.
+    SHOW_OUT=$(systemctl show $UNITS -p Id,MainPID,WorkingDirectory,User,ActiveState,SubState --no-pager 2>/dev/null)
+    echo "$SHOW_OUT"
+    SYSTEMD_PIDS=$(echo "$SHOW_OUT" | grep '^MainPID=' | cut -d= -f2 | grep -v '^0$')
+  fi
 else
   echo "@@UNAVAILABLE@@"
 fi
@@ -190,18 +203,23 @@ if command -v docker >/dev/null 2>&1 && timeout 5 docker info >/dev/null 2>&1; t
   echo "@@DF@@"
   timeout 10 docker system df 2>/dev/null
   echo "@@PIDS@@"
-  for cid in $(timeout 10 docker ps -q 2>/dev/null); do
-    pid=$(timeout 5 docker inspect --format '{{.State.Pid}}' "$cid" 2>/dev/null)
-    logpath=$(timeout 5 docker inspect --format '{{.LogPath}}' "$cid" 2>/dev/null)
-    logsize=""
-    if [ -n "$logpath" ]; then
-      logsize=$(stat -c%s "$logpath" 2>/dev/null)
-    fi
-    echo "$cid|$pid|$logsize"
-    if [ -n "$pid" ] && [ "$pid" != "0" ]; then
-      DOCKER_PIDS="$DOCKER_PIDS $pid"
-    fi
-  done
+  CIDS=$(timeout 10 docker ps -q 2>/dev/null)
+  if [ -n "$CIDS" ]; then
+    # One batched `docker inspect` for every container instead of two
+    # separate inspect calls per container - each is a real process spawn
+    # talking to the docker daemon, which adds up with many containers.
+    while IFS='|' read -r cid pid logpath; do
+      [ -z "$cid" ] && continue
+      logsize=""
+      if [ -n "$logpath" ]; then
+        logsize=$(stat -c%s "$logpath" 2>/dev/null)
+      fi
+      echo "$cid|$pid|$logsize"
+      if [ -n "$pid" ] && [ "$pid" != "0" ]; then
+        DOCKER_PIDS="$DOCKER_PIDS $pid"
+      fi
+    done < <(timeout 10 docker inspect --format '{{.Id}}|{{.State.Pid}}|{{.LogPath}}' $CIDS 2>/dev/null)
+  fi
 else
   echo "@@UNAVAILABLE@@"
 fi
@@ -246,24 +264,64 @@ def build_phase1_script(use_sudo: bool = False) -> str:
 
 
 def build_phase2_script(appdirs: List[str], logdirs: List[str]) -> str:
-    lines = ['#!/bin/bash', 'section() { echo "===SECTION:$1==="; }', '', 'section APPDIRS']
-    for d in appdirs[:MAX_APPDIR_CANDIDATES]:
+    """Size every candidate application/log directory concurrently.
+
+    Each `du`/`find` is started via process substitution on its own fixed
+    file descriptor (an in-kernel pipe, never a temp file on disk) as soon
+    as it's generated, so all of them run in parallel; results are then
+    read back in a fixed, deterministic order. With a real application list
+    (many app dirs, each with several log-directory candidates) this can
+    turn what used to be dozens of sequential, individually-timed-out `du`/
+    `find` calls - potentially minutes - into one wait bounded by whichever
+    single directory is slowest.
+    """
+    appdirs = appdirs[:MAX_APPDIR_CANDIDATES]
+    logdirs = logdirs[:MAX_LOGDIR_CANDIDATES]
+
+    lines = ['#!/bin/bash', 'section() { echo "===SECTION:$1==="; }', '']
+    fd = 20
+    appdir_fds = []
+    for d in appdirs:
         q = shlex.quote(d)
-        lines.append(f'if [ -d {q} ]; then echo "@@APPDIR:{d}@@"; timeout {APPDIR_TIMEOUT} du -xsk {q} 2>/dev/null; fi')
+        lines.append(f'if [ -d {q} ]; then exec {fd}< <(timeout {APPDIR_TIMEOUT} du -xsk {q} 2>/dev/null); fi')
+        appdir_fds.append(fd)
+        fd += 1
+
+    logdir_fds = []
+    for d in logdirs:
+        q = shlex.quote(d)
+        lines.append(
+            f'if [ -d {q} ]; then exec {fd}< <('
+            f'timeout {LOGDIR_TIMEOUT} du -xsk {q} 2>/dev/null; '
+            f"timeout {LOGDIR_TIMEOUT} find {q} -maxdepth {FIND_MAXDEPTH_LOG} -type f -printf '%s|%T@|%p\\n' 2>/dev/null "
+            f"| sort -t'|' -k1 -rn | head -20"
+            f'); fi'
+        )
+        logdir_fds.append(fd)
+        fd += 1
+
+    varlog_fd = fd
+    lines.append(
+        f"exec {varlog_fd}< <(timeout 10 find /var/log -maxdepth 2 -type f -printf '%s|%T@|%p\\n' 2>/dev/null "
+        f"| sort -t'|' -k1 -rn | head -30)"
+    )
+
+    lines.append('')
+    lines.append('section APPDIRS')
+    for d, dfd in zip(appdirs, appdir_fds):
+        q = shlex.quote(d)
+        lines.append(f'if [ -d {q} ]; then echo "@@APPDIR:{d}@@"; cat <&{dfd}; fi')
 
     lines.append('')
     lines.append('section LOGDIRS')
-    for d in logdirs[:MAX_LOGDIR_CANDIDATES]:
+    for d, dfd in zip(logdirs, logdir_fds):
         q = shlex.quote(d)
-        lines.append(f'if [ -d {q} ]; then echo "@@LOGDIR:{d}@@"; timeout {LOGDIR_TIMEOUT} du -xsk {q} 2>/dev/null; '
-                     f"timeout {LOGDIR_TIMEOUT} find {q} -maxdepth {FIND_MAXDEPTH_LOG} -type f -printf '%s|%T@|%p\\n' 2>/dev/null "
-                     f"| sort -t'|' -k1 -rn | head -20; fi")
+        lines.append(f'if [ -d {q} ]; then echo "@@LOGDIR:{d}@@"; cat <&{dfd}; fi')
 
     lines.append('')
     lines.append('section VARLOG_FILES')
-    lines.append(
-        f"timeout 10 find /var/log -maxdepth 2 -type f -printf '%s|%T@|%p\\n' 2>/dev/null | sort -t'|' -k1 -rn | head -30"
-    )
+    lines.append(f'cat <&{varlog_fd}')
+
     lines.append('')
     lines.append('section END')
     lines.append('echo DONE')
@@ -771,23 +829,32 @@ def parse_docker_ports(raw: str) -> List[Dict[str, Any]]:
 
 
 def parse_systemd(text: str) -> Dict[str, Any]:
+    """Parse a single batched `systemctl show <units...> -p Id,MainPID,...`
+    call for every running unit at once. There is no reliable blank-line
+    separator between units in this filtered-property form, so `Id=<unit>`
+    (requested first) is used as the per-unit delimiter instead - it's the
+    one property guaranteed to be unique and present for every unit."""
     text = text.strip()
     if not text or text.startswith("@@UNAVAILABLE@@"):
         return {"available": False, "services": []}
     body = text[len("@@AVAILABLE@@"):] if text.startswith("@@AVAILABLE@@") else text
-    blocks = re.split(r"@@UNIT:(.*?)@@", body)
+    body = body.strip()
+    if not body:
+        return {"available": True, "services": []}
+    blocks = re.split(r"(?m)^Id=", body)
     services = []
-    it = iter(blocks[1:])
-    for unit, content in zip(it, it):
+    for block in blocks:
+        block = block.strip()
+        if not block:
+            continue
+        lines = block.splitlines()
+        unit_name = lines[0].strip()
+        if not unit_name:
+            continue
         props: Dict[str, str] = {}
-        exec_start = ""
-        for line in content.strip().splitlines():
+        for line in lines[1:]:
             line = line.strip()
-            if not line:
-                continue
-            if line.startswith("ExecStart="):
-                exec_start = line[len("ExecStart="):]
-            elif "=" in line:
+            if "=" in line:
                 k, _, v = line.partition("=")
                 props[k] = v
         try:
@@ -795,13 +862,18 @@ def parse_systemd(text: str) -> Dict[str, Any]:
         except ValueError:
             main_pid = 0
         services.append({
-            "name": unit.strip(),
+            "name": unit_name,
             "main_pid": main_pid,
             "working_directory": props.get("WorkingDirectory", ""),
             "user": props.get("User", ""),
             "active_state": props.get("ActiveState", ""),
             "sub_state": props.get("SubState", ""),
-            "exec_start": exec_start,
+            # ExecStart is no longer fetched separately (that was another
+            # systemctl invocation per unit) - the live /proc cmdline
+            # (fetched for every systemd MainPID) is a more accurate source
+            # of "command" anyway, since it reflects what's actually
+            # running rather than the static unit-file directive.
+            "exec_start": "",
         })
     return {"available": True, "services": services}
 

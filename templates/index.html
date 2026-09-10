@@ -25,19 +25,19 @@
           <button type="submit" class="primary" id="analyze-btn">Analyze Server</button>
         </div>
       </div>
-      <label style="display:flex; align-items:center; gap:8px; margin-top:14px; font-size:13px; font-weight:normal;">
-        <input type="checkbox" id="use_sudo" style="width:auto;">
+      <label class="sudo-check">
+        <input type="checkbox" id="use_sudo">
         Attempt passwordless sudo for full port-ownership visibility (optional, off by default)
       </label>
     </form>
-    <p class="section-note" style="margin-top:12px;">
+    <p class="section-note" style="margin-top:14px;">
       Authenticates the same way a plain <code>ssh username@host</code> would - via your
       running ssh-agent and/or default keys in <code>~/.ssh/</code>. The server's public key
       must already be in that user's <code>~/.ssh/authorized_keys</code>. This app never
       writes, deletes, or modifies anything on the server - every remote command is
       read-only, and unknown SSH host keys are rejected rather than auto-trusted.
     </p>
-    <div id="progress" style="margin-top:14px;">
+    <div id="progress">
       <div class="spinner"></div>
       <span id="progress-text">Connecting to server...</span>
     </div>
@@ -172,26 +172,30 @@ function renderServerOverview(data) {
   </div>`;
 }
 
+function gauge(pct, status) {
+  const clamped = Math.max(0, Math.min(100, pct === null || pct === undefined ? 0 : pct));
+  return `<div class="gauge"><div class="gauge-fill ${status}" style="width:${clamped}%"></div></div>`;
+}
+
+function healthTile(label, valueText, pctForGauge, status) {
+  return `<div class="health-tile">
+    <div class="health-tile-top">
+      <span class="label">${label}</span>
+      ${pill(status)}
+    </div>
+    <div class="value">${valueText}</div>
+    ${gauge(pctForGauge, status)}
+  </div>`;
+}
+
 function renderHealthRow(data) {
   const h = data.health;
   return `<div class="card">
     <h2>Health Overview</h2>
     <div class="health-row">
-      <div class="health-tile">
-        <div class="label">CPU</div>
-        <div class="value">${data.cpu.usage_percent !== null ? data.cpu.usage_percent.toFixed(0) + "%" : "-"}</div>
-        ${pill(h.cpu.status)}
-      </div>
-      <div class="health-tile">
-        <div class="label">Memory</div>
-        <div class="value">${fmtPct(data.memory.usage_percent)}</div>
-        ${pill(h.memory.status)}
-      </div>
-      <div class="health-tile">
-        <div class="label">Disk (worst filesystem)</div>
-        <div class="value">${h.disk.value !== null ? h.disk.value.toFixed(0) + "%" : "-"}</div>
-        ${pill(h.disk.status)}
-      </div>
+      ${healthTile("CPU", data.cpu.usage_percent !== null ? data.cpu.usage_percent.toFixed(0) + "%" : "-", data.cpu.usage_percent, h.cpu.status)}
+      ${healthTile("Memory", fmtPct(data.memory.usage_percent), data.memory.usage_percent, h.memory.status)}
+      ${healthTile("Disk (worst filesystem)", h.disk.value !== null ? h.disk.value.toFixed(0) + "%" : "-", h.disk.value, h.disk.status)}
     </div>
   </div>`;
 }
@@ -473,7 +477,9 @@ function renderSystemd(data) {
 }
 
 function renderFindings(data) {
-  const items = data.findings.map(f => `<li class="${f.level}">${f.level === "ok" ? "&check;" : "&#9888;"} ${esc(f.message)}</li>`).join("");
+  const items = data.findings.map(f =>
+    `<li class="${f.level}"><span class="icon">${f.level === "ok" ? "&check;" : "&#9888;"}</span><span>${esc(f.message)}</span></li>`
+  ).join("");
   return `<div class="card">
     <h2>Findings</h2>
     <ul class="findings-list">${items || "<li>No notable findings.</li>"}</ul>

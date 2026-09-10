@@ -128,6 +128,27 @@ Python script / known daemon name, locating its logs, and mapping every
 listening port back to the application that owns it — happens in
 `analyzer.py`, in Python, not in the remote bash scripts.
 
+### Why it's fast despite doing all of this
+
+Every directory scan and most multi-item commands run **concurrently**, not
+sequentially:
+
+- All 7 fixed directories (`/`, `/var`, `/var/log`, ...) are `du`'d in
+  parallel via process substitution on fixed file descriptors — never a
+  temp file on disk — so total time is bounded by the single slowest scan,
+  not their sum.
+- Every candidate application/log directory in Phase 2 (up to ~50 on a
+  server with many applications) is scanned the same way. This is the
+  difference between what used to be dozens of sequential, individually
+  slow `du`/`find` calls (potentially minutes on a server with many
+  applications) and one bounded wait.
+- `systemctl show` is called **once** for every running service combined,
+  not once (or three times) per service — each `systemctl` call is a real
+  process spawn plus a D-Bus round trip, so this matters a lot with dozens
+  of services.
+- `docker inspect` is likewise batched into one call for every container
+  instead of two calls per container.
+
 ## Precise application identification
 
 Naming an application from just a raw command line is inherently
