@@ -51,13 +51,30 @@ your machine and only reads.
 
 ## Quick start
 
+Clone the repo, then run:
+
+```bash
+git clone <this-repo-url>
+cd ec2-resource-analyzer
+./run.sh
+```
+
+`run.sh` creates a virtual environment, installs dependencies, and starts the
+server — no manual setup needed. Re-running it later just reuses the
+existing venv and picks up any dependency changes.
+
+<details>
+<summary>Manual setup (or Windows, where <code>run.sh</code> won't run directly)</summary>
+
 ```bash
 python3 -m venv venv
-source venv/bin/activate
+source venv/bin/activate      # Windows: venv\Scripts\activate
 pip install -r requirements.txt
 
 uvicorn app:app --reload --port 8000
 ```
+
+</details>
 
 Open **http://localhost:8000**, enter:
 
@@ -275,6 +292,7 @@ your server.
 ec2-resource-analyzer/
 ├── app.py              FastAPI routes and startup
 ├── analyzer.py         SSH connection, remote scripts, parsing, correlation
+├── run.sh              One-command setup + launch (venv, deps, server)
 ├── requirements.txt
 ├── README.md
 ├── templates/
